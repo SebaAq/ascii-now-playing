@@ -23,7 +23,9 @@ Visualizador ASCII de lo que suena en Spotify. La tapa del disco se redibuja con
 
 1. En https://developer.spotify.com/dashboard creá una app (Web API) con redirect URI `http://127.0.0.1:8888/` (tiene que ser `127.0.0.1`, Spotify no acepta `localhost`).
 2. Pegá tu Client ID en `CLIENT_ID` en `index.html`.
-3. `python3 -m http.server 8888 --bind 127.0.0.1` y abrí http://127.0.0.1:8888/
+3. `docker compose up -d --build` (o `python3 -m http.server 8888 --bind 127.0.0.1`) y abrí http://127.0.0.1:8888/
+
+Con Docker queda sirviéndose con nginx solo en `127.0.0.1:8888`. Hay que entrar por `127.0.0.1` y no por la IP de la red: Spotify lo exige en el redirect URI y la cámara, el micrófono y la captura de pantalla solo funcionan en un origen seguro. Si cambiás `index.html`, repetí el comando para reconstruir la imagen.
 
 Controlar la reproducción (pausa, siguiente, anterior) requiere Spotify Premium.
 

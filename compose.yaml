@@ -1,0 +1,8 @@
+services:
+  ascii-now-playing:
+    build: .
+    ports:
+      # 127.0.0.1 y no 0.0.0.0: Spotify exige ese host en el redirect URI, y la cámara/micrófono/captura
+      # solo andan en un origen seguro (127.0.0.1 lo es; la IP de la red local no).
+      - "127.0.0.1:8888:80"
+    restart: unless-stopped

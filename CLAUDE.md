@@ -6,7 +6,7 @@ Visualizador ASCII de lo que suena en Spotify. Todo está en `index.html`, sin b
 
 1. En https://developer.spotify.com/dashboard creá una app (Web API) con redirect URI `http://127.0.0.1:8888/` (tiene que ser `127.0.0.1`, Spotify no acepta `localhost`).
 2. Pegá el Client ID en `CLIENT_ID` en `index.html`.
-3. `python3 -m http.server 8888 --bind 127.0.0.1` y abrí http://127.0.0.1:8888/
+3. `docker compose up -d --build` (o `python3 -m http.server 8888 --bind 127.0.0.1`) y abrí http://127.0.0.1:8888/. El compose publica solo en `127.0.0.1:8888` y hay que reconstruir (`--build`) tras editar `index.html`.
 
 Sin Spotify: `http://127.0.0.1:8888/?img=<imagen>` renderiza esa imagen (tiene que ser del mismo origen o tener CORS).
 
