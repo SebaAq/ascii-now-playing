@@ -2,6 +2,10 @@
 
 Visualizador ASCII de lo que suena en Spotify. La tapa del disco se redibuja con caracteres de colores, con la letra sincronizada en los márgenes, dibujitos al ritmo del beat, y se puede manejar con la mano. Todo vive en un solo `index.html`, sin build.
 
+![Captura: portada ilustrada convertida a ASCII, con letra sincronizada y barra de estado](docs/demo.png)
+
+*La portada de la captura es una ilustración de ejemplo.*
+
 ## Qué hace
 
 - **Tapa en ASCII:** crece de abajo hacia arriba cada vez que cambia el tema.
@@ -31,3 +35,7 @@ node test-gestos.mjs   # clasificación de gestos con manos sintéticas, sin cá
 ## Privacidad
 
 Todo corre en tu navegador. El login usa PKCE (sin backend ni client secret) y los tokens quedan en `localStorage`. La cámara y el micrófono se procesan localmente y no se graban ni se envían.
+
+## Licencia
+
+[MIT](LICENSE)
