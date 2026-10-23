@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Spotify</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas></canvas>
+<script>
+// Client ID de tu app en developer.spotify.com (redirect URI: http://127.0.0.1:8888/)
+const CLIENT_ID = '9d2ac7946ccb43f0806f7c68019d609d';
+const REDIRECT = location.origin + '/';
+const SCOPES = 'user-read-playback-state user-modify-playback-state';
+const RAMP = ' .\'`^",:;Il!i><~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$';
+const MONO = 'ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace'; // igual en cualquier máquina
+const FONT = 10, CW = FONT * 0.6, CH = FONT;
+const GROW_MS = 3000;
+const GAIN = 1.4, MIN_LUM = 0.12; // realce de color; las celdas más oscuras que MIN_LUM no se dibujan
+
+const cv = document.querySelector('canvas'), ctx = cv.getContext('2d');
+const src = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+const q = new URLSearchParams(location.search);
+const TAP = matchMedia('(pointer: coarse)').matches ? 'Tocá' : 'Clic';
+let img = null, cells = [], art = {}, born = 0, sparks = [], tint = { r: 255, g: 255, b: 255 };
+let player = null, fetchedAt = 0, msg = '', lyrics = [];
+
+// --- Spotify (PKCE, sin backend) ---
+
+const b64url = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+async function login() {
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(64)));
+  const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+  localStorage.verifier = verifier;
+  location = 'https://accounts.spotify.com/authorize?' + new URLSearchParams({
+    client_id: CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT,
+    code_challenge_method: 'S256', code_challenge: challenge, scope: SCOPES,
+  });
+}
+
+async function token(params) {
+  const r = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: CLIENT_ID, ...params }),
+  });
+  if (!r.ok) {
+    // Solo 400/401 dicen que el token no sirve más; 429 y 5xx son pasajeros y el polling reintenta.
+    if (r.status !== 400 && r.status !== 401) throw new Error(`Spotify no responde (${r.status}), reintentando...`);
+    localStorage.removeItem('refresh');
+    throw new Error(`Login falló (${r.status}). ${TAP} para reconectar.`);
+  }
+  const t = await r.json();
+  localStorage.access = t.access_token;
+  if (t.refresh_token) localStorage.refresh = t.refresh_token;
+  localStorage.expires = Date.now() + t.expires_in * 1000;
+}
+
+// Un solo refresh a la vez: Spotify rota el refresh token, y dos en paralelo (polling + teclado) se pisan.
+let refreshing = null;
+
+async function api(path, method = 'GET') {
+  if (Date.now() > +localStorage.expires - 60000)
+    await (refreshing ??= token({ grant_type: 'refresh_token', refresh_token: localStorage.refresh }).finally(() => refreshing = null));
+  const r = await fetch('https://api.spotify.com/v1/me/player' + path, { method, headers: { Authorization: 'Bearer ' + localStorage.access } });
+  if (!r.ok) throw new Error(`Spotify respondió ${r.status}` + (r.status === 403 ? ' (controlar la reproducción requiere Premium)' : ''));
+  const txt = await r.text();
+  return txt ? JSON.parse(txt) : null; // 204 = no hay nada sonando
+}
+
+// Teclado y gestos comparten esto.
+const CMD = { play: ['/play', 'PUT'], pause: ['/pause', 'PUT'], next: ['/next', 'POST'], prev: ['/previous', 'POST'] };
+function control(name) {
+  api(...CMD[name]).then(() => setTimeout(poll, 300)).catch(err => msg = err.message);
+}
+
+async function poll() {
+  try {
+    const p = await api('');
+    fetchedAt = performance.now();
+    const url = p?.item?.album?.images?.[0]?.url;
+    if (url && url !== player?.item?.album?.images?.[0]?.url) setCover(url);
+    if (p?.item?.id && p.item.id !== player?.item?.id) loadLyrics(p.item);
+    player = p; msg = '';
+  } catch (e) { msg = e.message; }
+}
+
+// Letra sincronizada de LRCLIB (Spotify no expone letras). Sin letra = no se muestra nada.
+async function loadLyrics(it) {
+  lyrics = [];
+  try {
+    const r = await fetch('https://lrclib.net/api/get?' + new URLSearchParams({
+      track_name: it.name, artist_name: it.artists[0].name, album_name: it.album.name, duration: Math.round(it.duration_ms / 1000),
+    }));
+    const { syncedLyrics } = await r.json();
+    if (player?.item?.id !== it.id) return; // cambió el tema mientras tanto
+    lyrics = (syncedLyrics ?? '').split('\n').map(l => l.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)/)).filter(Boolean)
+      .map(([, m, s, text]) => ({ t: (m * 60 + +s) * 1000, text }));
+  } catch {}
+}
+
+// --- Render ASCII ---
+
+function resize() {
+  // El canvas va en píxeles físicos para que el texto no salga borroso en pantallas 2x/3x; se dibuja en píxeles CSS.
+  const dpr = devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = `${FONT}px ${MONO}`; ctx.textBaseline = 'top';
+  const cols = Math.floor(innerWidth / CW), rows = Math.floor(innerHeight / CH) - 6;
+  const ar = vid ? vid.videoWidth / vid.videoHeight : 1; // la tapa es cuadrada; el video conserva su proporción
+  const w = Math.min(cols * CW, rows * CH * ar), h = w / ar;
+  art = { cols: Math.floor(w / CW), rows: Math.floor(h / CH), gw: cols, gh: rows };
+  art.x = (innerWidth - art.cols * CW) / 2;
+  art.y = (rows - art.rows) * CH / 2;
+  art.ox = Math.round(art.x / CW);
+  lyrics.forEach(l => delete l.at);
+  sparks = Array.from({ length: 80 }, () => ({ x: Math.random() * innerWidth, y: Math.random() * rows * CH, p: Math.random() * 6.28 }));
+  if (img || vid) build(false);
+}
+
+function setCover(url) {
+  const i = new Image();
+  i.crossOrigin = 'anonymous';
+  i.onload = () => { img = i; build(); };
+  i.src = url;
+}
+
+// Cada celda guarda su caracter final y un retardo: crece de abajo hacia arriba, como las flores.
+function build(animate = true) {
+  const { cols, rows } = art;
+  src.canvas.width = cols; src.canvas.height = rows;
+  src.drawImage(vid ?? img, 0, 0, cols, rows);
+  const d = src.getImageData(0, 0, cols, rows).data;
+  cells = [];
+  for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+    const i = (y * cols + x) * 4, r = d[i], g = d[i + 1], b = d[i + 2];
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 256;
+    if (lum < MIN_LUM) continue;
+    cells.push({ x, y, r: Math.min(r * GAIN, 255), g: Math.min(g * GAIN, 255), b: Math.min(b * GAIN, 255), ch: RAMP[Math.floor(lum * RAMP.length)], d: (1 - y / rows) * 0.75 + Math.random() * 0.25 });
+  }
+  // el más vivo (claro y saturado): el más claro a secas sale casi siempre blanco por el realce GAIN
+  const vivid = c => Math.max(c.r, c.g, c.b) + 2 * (Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b));
+  const v = cells.reduce((m, c) => vivid(c) > vivid(m) ? c : m, cells[0] ?? tint);
+  const lift = x => x + (255 - x) * 0.35; // un poco hacia el blanco: un azul puro no se lee sobre negro
+  tint = { r: lift(v.r), g: lift(v.g), b: lift(v.b) };
+  if (animate) born = performance.now();
+}
+
+// --- Video: Spotify no lo expone, así que se captura una pestaña (el videoclip en YouTube, etc.) y se pasa a ASCII en vivo ---
+
+let vid = null, vidErr = '', lastV = 0;
+
+async function video() {
+  if (vid) return stopVid();
+  try {
+    const s = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const v = document.createElement('video');
+    v.muted = true; v.srcObject = s;
+    s.getVideoTracks()[0].onended = stopVid; // cortó desde el botón del navegador
+    await v.play();
+    vid = v; vidErr = ''; resize();
+  } catch (e) { vidErr = 'video: ' + e.message; }
+}
+
+function stopVid() {
+  vid?.srcObject.getTracks().forEach(t => t.stop());
+  vid = null; resize();
+}
+
+// --- Gestos con la cámara (MediaPipe Hand Landmarker, cargado del CDN recién al apretar g) ---
+// Port de gestures.py de github.com/SebaAq/gesture-tracking: misma lógica, mantenerlas iguales.
+
+const MP = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+const MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task';
+const HOLD_MS = 600, COOLDOWN_MS = 1500; // la pose se sostiene HOLD_MS y entre órdenes pasa COOLDOWN_MS
+const GESTO_A_ORDEN = { 'puño': 'pause', 'mano abierta': 'play', 'señalar': 'next', 'paz': 'prev' };
+
+// GESTOS-BEGIN
+const FINGERS = { index: [8, 6, 5], middle: [12, 10, 9], ring: [16, 14, 13], pinky: [20, 18, 17] }; // [punta, PIP, MCP]
+
+function classify(lm) {
+  if (lm.length !== 21) throw new Error('Se esperan 21 puntos');
+  const d = (a, b) => Math.hypot(lm[a].x - lm[b].x, lm[a].y - lm[b].y);
+  const up = {};
+  for (const [name, [tip, pip]] of Object.entries(FINGERS)) up[name] = d(tip, 0) > d(pip, 0) * 1.15;
+  up.thumb = d(4, 5) > d(3, 5) * 1.25; // el pulgar se mueve de costado: se mide contra el nudillo del índice
+  const four = [up.index, up.middle, up.ring, up.pinky].join();
+  if (four === 'true,true,true,true') return 'mano abierta';
+  if (four === 'false,false,false,false')
+    return up.thumb && lm[4].y < lm[2].y && lm[2].y < lm[0].y ? 'pulgar arriba' : 'puño';
+  if (four === 'true,false,false,false') return 'señalar';
+  if (four === 'true,true,false,false') return 'paz';
+  if (four === 'true,false,false,true') return 'rock';
+  return 'desconocido';
+}
+// GESTOS-END
+
+let hands = null, handsBusy = false, handsErr = '', gesture = '', held = {}, lastAct = 0, lastD = 0;
+
+async function gestos() {
+  if (hands) return stopHands();
+  if (handsBusy) return;
+  handsBusy = true; handsErr = 'gestos: cargando modelo...';
+  try {
+    const { HandLandmarker, FilesetResolver } = await import(`${MP}/vision_bundle.mjs`);
+    const lm = await HandLandmarker.createFromOptions(await FilesetResolver.forVisionTasks(`${MP}/wasm`), {
+      baseOptions: { modelAssetPath: MODEL }, runningMode: 'VIDEO', numHands: 1, minHandDetectionConfidence: 0.6,
+    });
+    const s = await navigator.mediaDevices.getUserMedia({ video: true });
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.srcObject = s;
+    await v.play();
+    hands = { lm, v, s }; handsErr = '';
+  } catch (e) { handsErr = 'gestos: ' + e.message; }
+  handsBusy = false;
+}
+
+function stopHands() {
+  hands.s.getTracks().forEach(t => t.stop());
+  hands.lm.close();
+  hands = null; gesture = ''; held = {};
+}
+
+function detect(now) {
+  if (now - lastD < 50 || hands.v.readyState < 2) return; // ~20 detecciones por segundo
+  lastD = now;
+  const [hand] = hands.lm.detectForVideo(hands.v, now).landmarks;
+  gesture = hand ? classify(hand) : '';
+  if (gesture !== held.g) held = { g: gesture, since: now }; // cambió la pose: vuelve a contar
+  const orden = GESTO_A_ORDEN[gesture];
+  if (!orden || held.done || now - held.since < HOLD_MS || now - lastAct < COOLDOWN_MS || !player) return;
+  held.done = true; // una orden por pose sostenida: señalar no salta temas en loop
+  if ((orden === 'pause' && !player.is_playing) || (orden === 'play' && player.is_playing)) return; // Spotify da 403 si ya está así
+  lastAct = now;
+  control(orden);
+}
+
+// --- Beat por micrófono (Spotify ya no da beats; se escuchan los graves de lo que suena por los parlantes) ---
+
+let an = null, bins, level = 0, avg = 0, lastBeat = 0, pulse = 0, micErr = '';
+
+async function mic() {
+  if (an) return;
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const ac = new AudioContext();
+    an = ac.createAnalyser(); an.fftSize = 1024;
+    ac.createMediaStreamSource(s).connect(an);
+    bins = new Uint8Array(an.frequencyBinCount); micErr = '';
+  } catch (e) { micErr = 'mic: ' + e.message; }
+}
+
+// Beat = los graves (~50-500 Hz, los mics de notebook casi no captan más abajo) superan su promedio del último segundo.
+// ponytail: umbrales fijos, ajustar BEAT_MIN / BEAT_RATIO si no pega.
+const BEAT_MIN = 0.05, BEAT_RATIO = 1.15;
+function beat(now) {
+  pulse *= 0.9;
+  if (!an) return;
+  an.getByteFrequencyData(bins);
+  let e = 0;
+  for (let i = 1; i <= 10; i++) e += bins[i];
+  e = level = e / 2550;
+  if (e > BEAT_MIN && e > avg * BEAT_RATIO && now - lastBeat > 250) { pulse = 1; lastBeat = now; doodle(now); }
+  avg = avg * 0.98 + e * 0.02;
+}
+
+// En cada beat aparece un dibujito en los márgenes, con un color de la tapa; sube y se apaga.
+const DOODLES = [['♪'], ['♫'], ['<3'], ['\\o/'], ['(*)'], ['~~>'], [' . ', '-*-', " ' "], [' /\\ ', '<  >', ' \\/ ']];
+const DOODLE_MS = 1500;
+let doodles = [];
+
+function doodle(now) {
+  const { ox, cols, gw, gh } = art;
+  const sides = [[0, ox - 4], [ox + cols, gw - 4]].filter(([a, b]) => b > a);
+  const [a, b] = sides[Math.random() * sides.length | 0] ?? [0, gw - 4];
+  // El más claro de unas celdas al azar, para que no salga un dibujito apagado.
+  const c = Array.from({ length: 8 }, () => cells[Math.random() * cells.length | 0]).filter(Boolean)
+    .reduce((m, c) => c.r + c.g + c.b > m.r + m.g + m.b ? c : m, { r: 200, g: 200, b: 200 });
+  doodles.push({ s: DOODLES[Math.random() * DOODLES.length | 0], x: (a + Math.random() * (b - a)) * CW, y: Math.random() * (gh - 3) * CH, born: now, rgb: `${c.r},${c.g},${c.b}` });
+  if (doodles.length > 30) doodles.shift();
+}
+
+function drawDoodles(now) {
+  doodles = doodles.filter(d => now - d.born < DOODLE_MS);
+  for (const d of doodles) {
+    const t = (now - d.born) / DOODLE_MS;
+    ctx.fillStyle = `rgba(${d.rgb},${1 - t})`;
+    d.s.forEach((line, i) => ctx.fillText(t < 0.08 ? line.replace(/\S/g, () => RAMP[Math.random() * RAMP.length | 0]) : line, d.x, d.y - t * 3 * CH + i * CH));
+  }
+}
+
+const mmss = ms => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
+
+const progress = now => Math.min(player.progress_ms + (player.is_playing ? now - fetchedAt : 0), player.item.duration_ms);
+
+// La letra va a un lugar al azar de los márgenes negros a los costados de la tapa,
+// cortada en renglones para que entre en el margen más ancho.
+function place(text) {
+  const { gw, gh, ox, cols, rows } = art, LW = 2; // un caracter de la letra ocupa 2 columnas (fuente al doble de las celdas)
+  const top = Math.floor(art.y / CH), bottom = top + rows; // filas libres arriba y abajo de la tapa
+  // Dónde puede ir: los costados; si no entra (celular: la tapa ocupa todo el ancho), las franjas de arriba y abajo; y si no, cualquier lado.
+  const rects = [[0, ox, 0, gh], [ox + cols, gw, 0, gh]].filter(r => r[1] - r[0] >= 26);
+  if (!rects.length) rects.push(...[[0, gw, 0, top], [0, gw, bottom, gh]].filter(r => r[3] - r[2] >= 4));
+  const [a, b, y0, y1] = rects[Math.random() * rects.length | 0] ?? [0, gw, 0, gh];
+  const max = Math.max(10, Math.floor((b - a - 6) / LW));
+  const lines = [''];
+  for (const w of text.toUpperCase().split(' ')) {
+    if (lines.at(-1) && (lines.at(-1) + ' ' + w).length > max) lines.push(w);
+    else lines[lines.length - 1] = lines.at(-1) ? lines.at(-1) + ' ' + w : w;
+  }
+  const w = Math.max(...lines.map(s => s.length)) * LW, h = lines.length * 2;
+  // La letra se dibuja una columna a la derecha de x; deja 2 columnas de aire contra el borde y contra la tapa.
+  const lo = a + 1, hi = Math.max(lo, b - 3 - w);
+  return { lines, x: lo + (Math.random() * (hi - lo + 1) | 0), y: y0 + (Math.random() * Math.max(1, y1 - y0 - h + 1) | 0) };
+}
+
+// Cada línea aparece en otro lugar y se "tipea" con caracteres al azar que se asientan, igual que la tapa al crecer.
+function say(l, pos, alpha) {
+  if (!l.text || alpha <= 0) return;
+  l.at ??= place(l.text);
+  ctx.fillStyle = `rgba(${tint.r},${tint.g},${tint.b},${Math.min(alpha, 1)})`;
+  ctx.strokeStyle = `rgba(0,0,0,${0.85 * Math.min(alpha, 1)})`; ctx.lineWidth = 4; ctx.lineJoin = 'round';
+  let j = 0;
+  l.at.lines.forEach((s, row) => {
+    const text = [...s].map(c => {
+      const k = (pos - l.t) / 30 - j++;
+      return k > 4 || c === ' ' ? c : k > 0 ? RAMP[Math.random() * RAMP.length | 0] : ' ';
+    }).join('');
+    const x = (l.at.x + 1) * CW, y = (l.at.y + row * 2) * CH;
+    ctx.shadowBlur = 0; ctx.strokeText(text, x, y); ctx.shadowBlur = 6; // contorno negro: despega la letra si cae sobre el arte
+    ctx.fillText(text, x, y);
+  });
+}
+
+function lyric(now) {
+  if (!player?.item || !lyrics.length) return;
+  const pos = progress(now), i = lyrics.findLastIndex(l => l.t <= pos);
+  if (i < 0) return;
+  ctx.font = `${FONT * 2}px ${MONO}`;
+  ctx.shadowColor = `rgb(${tint.r},${tint.g},${tint.b})`; ctx.shadowBlur = 6;
+  if (i > 0) say(lyrics[i - 1], pos, 1 - (pos - lyrics[i].t) / 800); // la anterior se apaga
+  say(lyrics[i], pos, 1);
+  ctx.shadowBlur = 0;
+  ctx.font = `${FONT}px ${MONO}`;
+}
+
+function status(now) {
+  const it = player?.item;
+  if (!it) return ['Nada sonando. Poné algo en Spotify.', ''];
+  const pos = progress(now);
+  const w = Math.max(10, Math.min(40, Math.floor((innerWidth - 40) / 7.2) - 16)), n = Math.round(pos / it.duration_ms * w); // 7.2 px = un caracter a 12px
+  return [
+    `${player.is_playing ? '>' : '||'} ${it.name} - ${it.artists?.map(a => a.name).join(', ') ?? ''}`,
+    `[${'#'.repeat(n)}${'-'.repeat(w - n)}] ${mmss(pos)} / ${mmss(it.duration_ms)}${TAP === 'Tocá' ? '' : `    espacio: play/pausa   <- ->: tema   ${micErr || (an ? `mic [${'#'.repeat(Math.round(level * 10)).padEnd(10, '-')}]${pulse > 0.5 ? ' BEAT' : ''}` : 'm: micrófono (beat)')}   ${vidErr || (vid ? 'v: cortar video' : 'v: video')}   ${handsErr || (hands ? `g: cortar gestos [${gesture || '-'}]` : 'g: gestos')}`}`,
+  ];
+}
+
+function draw(now) {
+  beat(now);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, innerWidth, innerHeight);
+  for (const s of sparks) {
+    const a = Math.sin(now / 700 + s.p);
+    if (a > 0.6) { ctx.fillStyle = `rgba(255,255,255,${a - 0.6})`; ctx.fillText(a > 0.9 ? '*' : '.', s.x, s.y); }
+  }
+  drawDoodles(now);
+  // ponytail: reconstruye todas las celdas a ~20 fps; si el GC molesta, reusar el array de celdas.
+  if (vid && now - lastV > 50) { build(false); lastV = now; }
+  if (hands) detect(now);
+  const t = (now - born) / GROW_MS, playing = player?.is_playing;
+  for (const c of cells) {
+    const k = (t - c.d) * 4;
+    if (k <= 0) continue;
+    const wave = playing ? 0.85 + 0.1 * Math.sin(now / 250 - c.y * 0.15) + 0.3 * pulse : 0.85;
+    ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${Math.min(k, 1) * wave})`;
+    const ch = k < 1 || Math.random() < 0.002 + 0.06 * pulse ?RAMP[Math.random() * RAMP.length | 0] : c.ch;
+    ctx.fillText(ch, art.x + c.x * CW, art.y + c.y * CH);
+  }
+  lyric(now);
+  ctx.fillStyle = '#eee';
+  if (msg && !player) { // sin reproducción el mensaje es lo único que hay para hacer: va al centro
+    ctx.font = `bold 18px ${MONO}`; ctx.textAlign = 'center';
+    ctx.fillText(msg, innerWidth / 2, innerHeight / 2, innerWidth - 32);
+    ctx.textAlign = 'left';
+  } else {
+    const [l1, l2] = msg ? [msg, ''] : status(now);
+    ctx.font = `12px ${MONO}`; ctx.fillStyle = `rgba(${tint.r},${tint.g},${tint.b},0.8)`;
+    ctx.fillText(l1, 20, innerHeight - 40);
+    ctx.fillText(l2, 20, innerHeight - 22);
+  }
+  ctx.font = `${FONT}px ${MONO}`;
+  requestAnimationFrame(draw);
+}
+
+// --- Arranque ---
+
+addEventListener('resize', resize);
+addEventListener('keydown', e => {
+  if (e.key === 'm') mic();
+  if (e.key === 'v') video();
+  if (e.key === 'g') gestos();
+  if (e.key === 'd') doodle(performance.now()); // prueba sin micrófono
+  if (!player) return;
+  const cmd = { ' ': player.is_playing ? 'pause' : 'play', ArrowRight: 'next', ArrowLeft: 'prev' }[e.key];
+  if (cmd) control(cmd);
+});
+cv.onclick = () => CLIENT_ID && (localStorage.refresh ? mic() : login());
+
+async function start() {
+  try {
+    if (q.get('code')) {
+      history.replaceState(null, '', REDIRECT);
+      await token({ grant_type: 'authorization_code', code: q.get('code'), redirect_uri: REDIRECT, code_verifier: localStorage.verifier });
+    }
+    if (!localStorage.refresh) { msg = `${TAP} para conectar Spotify.`; return; }
+    poll(); setInterval(poll, 2000);
+  } catch (e) { msg = e.message; }
+}
+
+resize();
+requestAnimationFrame(draw);
+if (q.get('img')) setCover(q.get('img')); // demo sin Spotify: ?img=foto.jpg
+else if (!CLIENT_ID) msg = 'Falta CLIENT_ID en index.html (ver CLAUDE.md).';
+else start();
+</script>
+</body>
+</html>
