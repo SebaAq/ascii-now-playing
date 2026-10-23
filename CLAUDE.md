@@ -12,7 +12,7 @@ Sin Spotify: `http://127.0.0.1:8888/?img=<imagen>` renderiza esa imagen (tiene q
 
 ## Teclas
 
-`espacio` play/pausa, `←`/`→` tema, `m` micrófono (beat), `v` capturar una pestaña con video, `g` gestos con la cámara
+`espacio` play/pausa, `←`/`→` tema, `m` micrófono o `a` audio de la PC (beat y efectos), `v` capturar una pestaña con video, `g` gestos con la cámara
 (puño = pausa, mano abierta = play, señalar = siguiente, paz = anterior; hay que sostener la pose 0,6 s).
 `classify()` es un port de `gestures.py` de github.com/SebaAq/gesture-tracking: si cambia uno, cambiar el otro.
 

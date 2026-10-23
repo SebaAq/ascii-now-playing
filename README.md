@@ -10,7 +10,11 @@ Visualizador ASCII de lo que suena en Spotify. La tapa del disco se redibuja con
 
 - **Tapa en ASCII:** crece de abajo hacia arriba cada vez que cambia el tema.
 - **Letra sincronizada** (de [LRCLIB](https://lrclib.net)), con el color de la tapa y alineada a la grilla del arte.
-- **Beat por micrófono** (`m`): escucha los graves de lo que suena por los parlantes y dispara dibujitos.
+- **Audio en vivo** (`a` o `m`): Spotify ya no da beats ni análisis de canciones, así que se escucha lo que suena. `a` captura el **audio de la PC** (al compartir pantalla, marcá "compartir audio del sistema"; Chrome o Edge en Windows), limpio y sin depender del volumen; `m` usa el micrófono y escucha los parlantes. De ahí salen los efectos:
+  - **Graves:** pulso de la tapa y dibujitos en los márgenes.
+  - **Agudos** (platillos, voces): destellos en las estrellas del fondo.
+  - **Brillo del sonido:** los colores se enfrían cuando suena más agudo que el promedio del tema y se calientan cuando suena más grave.
+  - **Silencio:** la tapa se desarma en caracteres al azar y se rearma cuando vuelve el sonido.
 - **Video** (`v`): captura una pestaña (un videoclip en YouTube, por ejemplo) y la convierte a ASCII en vivo.
 - **Gestos con la cámara** (`g`): puño = pausa, mano abierta = play, señalar = siguiente, paz = anterior. Hay que sostener la pose 0,6 s. Usa [MediaPipe](https://ai.google.dev/edge/mediapipe) (se carga del CDN recién al activarlo) y es un port de [gesture-tracking](https://github.com/SebaAq/gesture-tracking).
 - **Teclado:** `espacio` play/pausa, `←` `→` tema.

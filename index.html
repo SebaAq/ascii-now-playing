@@ -85,7 +85,7 @@ async function poll() {
     fetchedAt = performance.now();
     const url = p?.item?.album?.images?.[0]?.url;
     if (url && url !== player?.item?.album?.images?.[0]?.url) setCover(url);
-    if (p?.item?.id && p.item.id !== player?.item?.id) loadLyrics(p.item);
+    if (p?.item?.id && p.item.id !== player?.item?.id) { loadLyrics(p.item); centAvg = hiAvg = 0; } // cada tema arranca con su propio promedio
     player = p; msg = '';
   } catch (e) { msg = e.message; }
 }
@@ -242,33 +242,84 @@ function detect(now) {
   control(orden);
 }
 
-// --- Beat por micrófono (Spotify ya no da beats; se escuchan los graves de lo que suena por los parlantes) ---
+// --- Audio: beat y efectos. Spotify ya no da beats ni análisis, así que se escucha lo que suena:
+// `a` = audio de la PC (compartir pantalla con "audio del sistema": limpio, sin ruido del cuarto) o `m` = micrófono (parlantes). ---
 
-let an = null, bins, level = 0, avg = 0, lastBeat = 0, pulse = 0, micErr = '';
+let an = null, ac = null, audioStream = null, audioSrc = '', bins, level = 0, avg = 0, lastBeat = 0, pulse = 0, micErr = '';
+let shine = 0, hiAvg = 0, cent = 0, centAvg = 0, tilt = 0, lastLoud = 0, disarm = 0;
+
+function stopAudio() {
+  audioStream?.getTracks().forEach(t => t.stop());
+  ac?.close();
+  an = ac = audioStream = null; audioSrc = ''; level = shine = tilt = disarm = 0;
+}
+
+function listen(stream, name) {
+  stopAudio();
+  audioStream = stream; audioSrc = name;
+  ac = new AudioContext();
+  an = ac.createAnalyser(); an.fftSize = 1024;
+  ac.createMediaStreamSource(stream).connect(an);
+  bins = new Uint8Array(an.frequencyBinCount); micErr = '';
+  hiAvg = centAvg = 0; lastLoud = performance.now();
+}
+
+const RAW_AUDIO = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
 
 async function mic() {
   if (an) return;
+  try { listen(await navigator.mediaDevices.getUserMedia({ audio: RAW_AUDIO }), 'mic'); }
+  catch (e) { micErr = 'mic: ' + e.message; }
+}
+
+async function pcAudio() {
+  if (audioSrc === 'pc') return stopAudio();
   try {
-    const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-    const ac = new AudioContext();
-    an = ac.createAnalyser(); an.fftSize = 1024;
-    ac.createMediaStreamSource(s).connect(an);
-    bins = new Uint8Array(an.frequencyBinCount); micErr = '';
-  } catch (e) { micErr = 'mic: ' + e.message; }
+    // El video no se usa pero la captura lo exige; se deja vivo porque cortarlo puede cortar el audio.
+    const s = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: RAW_AUDIO });
+    if (!s.getAudioTracks().length) {
+      s.getTracks().forEach(t => t.stop());
+      throw new Error('no se compartió audio: marcá "compartir audio del sistema" (Chrome o Edge en Windows)');
+    }
+    s.getAudioTracks()[0].onended = stopAudio;
+    listen(s, 'pc');
+  } catch (e) { micErr = 'audio: ' + e.message; }
 }
 
 // Beat = los graves (~50-500 Hz, los mics de notebook casi no captan más abajo) superan su promedio del último segundo.
 // ponytail: umbrales fijos, ajustar BEAT_MIN / BEAT_RATIO si no pega.
 const BEAT_MIN = 0.05, BEAT_RATIO = 1.15;
+const SILENCE = 0.1, SILENCE_MS = 1500; // pico del espectro por debajo de SILENCE (0-1) durante SILENCE_MS = silencio (el pico, no el promedio: un bajo solo ocupa pocas bandas)
 function beat(now) {
-  pulse *= 0.9;
+  pulse *= 0.9; shine *= 0.9;
   if (!an) return;
   an.getByteFrequencyData(bins);
-  let e = 0;
-  for (let i = 1; i <= 10; i++) e += bins[i];
+  let e = 0, all = 0, hi = 0, w = 0, peak = 0;
+  for (let i = 1; i < 256; i++) {
+    const v = bins[i];
+    all += v; w += v * i; if (v > peak) peak = v;
+    if (i <= 10) e += v; else if (i >= 60) hi += v; // graves (hasta ~470 Hz) y agudos (desde ~2,8 kHz)
+  }
   e = level = e / 2550;
   if (e > BEAT_MIN && e > avg * BEAT_RATIO && now - lastBeat > 250) { pulse = 1; lastBeat = now; doodle(now); }
   avg = avg * 0.98 + e * 0.02;
+
+  // Agudos (platillos, voces): picos sobre su promedio -> destellos en las estrellas.
+  hi /= 196 * 255;
+  shine = Math.max(shine, Math.min(1, (hi - hiAvg) * 8));
+  hiAvg = hiAvg * 0.98 + hi * 0.02;
+
+  // Silencio: la tapa se desarma en caracteres al azar y se rearma cuando vuelve el sonido.
+  if (peak / 255 > SILENCE) lastLoud = now;
+  disarm += ((now - lastLoud > SILENCE_MS ? 1 : 0) - disarm) * 0.05;
+
+  // Brillo del sonido respecto de su propio promedio: más agudo que de costumbre = colores más fríos, más grave = más cálidos.
+  if (all) {
+    const raw = w / all / 255;
+    cent = centAvg ? cent * 0.9 + raw * 0.1 : raw;
+    centAvg = centAvg ? centAvg * 0.998 + cent * 0.002 : raw; // ponytail: depende de los fps (~8 s a 60); pasar a tiempo real si importa
+    tilt = Math.max(-0.3, Math.min(0.3, (cent - centAvg) * 12));
+  } else tilt *= 0.95;
 }
 
 // En cada beat aparece un dibujito en los márgenes, con un color de la tapa; sube y se apaga.
@@ -358,7 +409,7 @@ function status(now) {
   const w = Math.max(10, Math.min(40, Math.floor((innerWidth - 40) / 7.2) - 16)), n = Math.round(pos / it.duration_ms * w); // 7.2 px = un caracter a 12px
   return [
     `${player.is_playing ? '>' : '||'} ${it.name} - ${it.artists?.map(a => a.name).join(', ') ?? ''}`,
-    `[${'#'.repeat(n)}${'-'.repeat(w - n)}] ${mmss(pos)} / ${mmss(it.duration_ms)}${TAP === 'Tocá' ? '' : `    espacio: play/pausa   <- ->: tema   ${micErr || (an ? `mic [${'#'.repeat(Math.round(level * 10)).padEnd(10, '-')}]${pulse > 0.5 ? ' BEAT' : ''}` : 'm: micrófono (beat)')}   ${vidErr || (vid ? 'v: cortar video' : 'v: video')}   ${handsErr || (hands ? `g: cortar gestos [${gesture || '-'}]` : 'g: gestos')}`}`,
+    `[${'#'.repeat(n)}${'-'.repeat(w - n)}] ${mmss(pos)} / ${mmss(it.duration_ms)}${TAP === 'Tocá' ? '' : `    espacio: play/pausa   <- ->: tema   ${micErr || (an ? `${audioSrc} [${'#'.repeat(Math.round(level * 10)).padEnd(10, '-')}]${pulse > 0.5 ? ' BEAT' : ''}` : 'm: micrófono · a: audio de la PC')}   ${vidErr || (vid ? 'v: cortar video' : 'v: video')}   ${handsErr || (hands ? `g: cortar gestos [${gesture || '-'}]` : 'g: gestos')}`}`,
   ];
 }
 
@@ -366,7 +417,7 @@ function draw(now) {
   beat(now);
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, innerWidth, innerHeight);
   for (const s of sparks) {
-    const a = Math.sin(now / 700 + s.p);
+    const a = Math.sin(now / 700 + s.p) + 0.7 * shine;
     if (a > 0.6) { ctx.fillStyle = `rgba(255,255,255,${a - 0.6})`; ctx.fillText(a > 0.9 ? '*' : '.', s.x, s.y); }
   }
   drawDoodles(now);
@@ -378,8 +429,8 @@ function draw(now) {
     const k = (t - c.d) * 4;
     if (k <= 0) continue;
     const wave = playing ? 0.85 + 0.1 * Math.sin(now / 250 - c.y * 0.15) + 0.3 * pulse : 0.85;
-    ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${Math.min(k, 1) * wave})`;
-    const ch = k < 1 || Math.random() < 0.002 + 0.06 * pulse ?RAMP[Math.random() * RAMP.length | 0] : c.ch;
+    ctx.fillStyle = `rgba(${c.r * (1 - tilt)},${c.g},${Math.min(255, c.b * (1 + tilt))},${Math.min(k, 1) * wave * (1 - 0.6 * disarm)})`;
+    const ch = k < 1 || Math.random() < 0.002 + 0.06 * pulse + 0.7 * disarm ? RAMP[Math.random() * RAMP.length | 0] : c.ch;
     ctx.fillText(ch, art.x + c.x * CW, art.y + c.y * CH);
   }
   lyric(now);
@@ -403,6 +454,7 @@ function draw(now) {
 addEventListener('resize', resize);
 addEventListener('keydown', e => {
   if (e.key === 'm') mic();
+  if (e.key === 'a') pcAudio();
   if (e.key === 'v') video();
   if (e.key === 'g') gestos();
   if (e.key === 'd') doodle(performance.now()); // prueba sin micrófono
