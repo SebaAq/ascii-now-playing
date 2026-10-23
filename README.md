@@ -16,7 +16,7 @@ Visualizador ASCII de lo que suena en Spotify. La tapa del disco se redibuja con
   - **Brillo del sonido:** los colores se enfrían cuando suena más agudo que el promedio del tema y se calientan cuando suena más grave.
   - **Silencio:** la tapa se desarma en caracteres al azar y se rearma cuando vuelve el sonido.
 - **Video** (`v`): captura una pestaña (un videoclip en YouTube, por ejemplo) y la convierte a ASCII en vivo.
-- **Gestos con la cámara** (`g`): puño = pausa, mano abierta = play, señalar = siguiente, paz = anterior. Hay que sostener la pose 0,6 s. Usa [MediaPipe](https://ai.google.dev/edge/mediapipe) (se carga del CDN recién al activarlo) y es un port de [gesture-tracking](https://github.com/SebaAq/gesture-tracking).
+- **Gestos con la cámara** (`g`): puño = pausa, mano abierta = play, señalar = siguiente, paz = anterior. Rock pone los gestos en pausa (para mover la mano sin cambiar nada) y pulgar arriba los reactiva. Hay que sostener la pose 0,6 s. Usa [MediaPipe](https://ai.google.dev/edge/mediapipe) (se carga del CDN recién al activarlo) y es un port de [gesture-tracking](https://github.com/SebaAq/gesture-tracking).
 - **Teclado:** `espacio` play/pausa, `←` `→` tema.
 
 ## Correr

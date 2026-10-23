@@ -180,7 +180,7 @@ function stopVid() {
 const MP = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 const MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task';
 const HOLD_MS = 600, COOLDOWN_MS = 1500; // la pose se sostiene HOLD_MS y entre órdenes pasa COOLDOWN_MS
-const GESTO_A_ORDEN = { 'puño': 'pause', 'mano abierta': 'play', 'señalar': 'next', 'paz': 'prev' };
+const GESTO_A_ORDEN = { 'puño': 'pause', 'mano abierta': 'play', 'señalar': 'next', 'paz': 'prev', 'rock': 'lock', 'pulgar arriba': 'unlock' };
 
 // GESTOS-BEGIN
 const FINGERS = { index: [8, 6, 5], middle: [12, 10, 9], ring: [16, 14, 13], pinky: [20, 18, 17] }; // [punta, PIP, MCP]
@@ -226,7 +226,7 @@ onmessage = async ({ data }) => {
 };`;
 const DETECT_MS = 100; // 10 detecciones por segundo: sobra para poses que se sostienen HOLD_MS
 
-let hands = null, handsBusy = false, handsErr = '', gesture = '', held = {}, lastAct = 0, lastD = 0;
+let hands = null, handsBusy = false, handsErr = '', gesture = '', held = {}, lastAct = 0, lastD = 0, locked = false;
 
 async function gestos() {
   if (hands) return stopHands();
@@ -254,7 +254,7 @@ async function gestos() {
 function stopHands() {
   hands.s.getTracks().forEach(t => t.stop());
   hands.w.terminate();
-  hands = null; gesture = ''; held = {};
+  hands = null; gesture = ''; held = {}; locked = false;
 }
 
 // Desde draw(): manda un cuadro al Worker si no hay otro en curso. No espera el resultado.
@@ -269,7 +269,10 @@ function onHand(hand, now) {
   gesture = hand ? classify(hand) : '';
   if (gesture !== held.g) held = { g: gesture, since: now }; // cambió la pose: vuelve a contar
   const orden = GESTO_A_ORDEN[gesture];
-  if (!orden || held.done || now - held.since < HOLD_MS || now - lastAct < COOLDOWN_MS || !player) return;
+  if (!orden || held.done || now - held.since < HOLD_MS) return;
+  // rock bloquea las órdenes (para mover la mano sin cambiar nada) y pulgar arriba las vuelve a habilitar
+  if (orden === 'lock' || orden === 'unlock') { held.done = true; locked = orden === 'lock'; return; }
+  if (locked || now - lastAct < COOLDOWN_MS || !player) return;
   held.done = true; // una orden por pose sostenida: señalar no salta temas en loop
   if ((orden === 'pause' && !player.is_playing) || (orden === 'play' && player.is_playing)) return; // Spotify da 403 si ya está así
   lastAct = now;
@@ -443,7 +446,7 @@ function status(now) {
   const w = Math.max(10, Math.min(40, Math.floor((innerWidth - 40) / 7.2) - 16)), n = Math.round(pos / it.duration_ms * w); // 7.2 px = un caracter a 12px
   return [
     `${player.is_playing ? '>' : '||'} ${it.name} - ${it.artists?.map(a => a.name).join(', ') ?? ''}`,
-    `[${'#'.repeat(n)}${'-'.repeat(w - n)}] ${mmss(pos)} / ${mmss(it.duration_ms)}${TAP === 'Tocá' ? '' : `    espacio: play/pausa   <- ->: tema   ${micErr || (an ? `${audioSrc} [${'#'.repeat(Math.round(level * 10)).padEnd(10, '-')}]${pulse > 0.5 ? ' BEAT' : ''}` : 'm: micrófono · a: audio de la PC')}   ${vidErr || (vid ? 'v: cortar video' : 'v: video')}   ${handsErr || (hands ? `g: cortar gestos (${hands.via}) [${gesture || '-'}]` : 'g: gestos')}`}`,
+    `[${'#'.repeat(n)}${'-'.repeat(w - n)}] ${mmss(pos)} / ${mmss(it.duration_ms)}${TAP === 'Tocá' ? '' : `    espacio: play/pausa   <- ->: tema   ${micErr || (an ? `${audioSrc} [${'#'.repeat(Math.round(level * 10)).padEnd(10, '-')}]${pulse > 0.5 ? ' BEAT' : ''}` : 'm: micrófono · a: audio de la PC')}   ${vidErr || (vid ? 'v: cortar video' : 'v: video')}   ${handsErr || (hands ? `g: cortar gestos (${hands.via}) [${gesture || '-'}]${locked ? ' EN PAUSA (pulgar arriba para seguir)' : ''}` : 'g: gestos')}`}`,
   ];
 }
 
