@@ -202,36 +202,70 @@ function classify(lm) {
 }
 // GESTOS-END
 
+// La detección corre en un Worker: en el hilo principal tardaba ~50 ms por cuadro y trababa la animación.
+// Worker clásico (no module) porque el cargador de MediaPipe usa importScripts.
+const HAND_WORKER = `
+let lm;
+onmessage = async ({ data }) => {
+  if (data.init) {
+    try {
+      const { HandLandmarker, FilesetResolver } = await import(data.mp + '/vision_bundle.mjs');
+      const fs = await FilesetResolver.forVisionTasks(data.mp + '/wasm');
+      const opts = delegate => ({ baseOptions: { modelAssetPath: data.model, delegate }, canvas: new OffscreenCanvas(1, 1),
+        runningMode: 'VIDEO', numHands: 1, minHandDetectionConfidence: 0.6 });
+      try { lm = await HandLandmarker.createFromOptions(fs, opts('GPU')); postMessage({ ready: 'GPU' }); }
+      catch { lm = await HandLandmarker.createFromOptions(fs, opts('CPU')); postMessage({ ready: 'CPU' }); }
+    } catch (e) { postMessage({ error: e.message }); }
+    return;
+  }
+  // Siempre responde, aunque falle: si no, el hilo principal queda esperando y la detección se congela.
+  let hand = null;
+  try { hand = lm.detectForVideo(data.frame, data.t).landmarks[0] ?? null; } catch {}
+  data.frame.close();
+  postMessage({ hand });
+};`;
+const DETECT_MS = 100; // 10 detecciones por segundo: sobra para poses que se sostienen HOLD_MS
+
 let hands = null, handsBusy = false, handsErr = '', gesture = '', held = {}, lastAct = 0, lastD = 0;
 
 async function gestos() {
   if (hands) return stopHands();
   if (handsBusy) return;
   handsBusy = true; handsErr = 'gestos: cargando modelo...';
+  let w;
   try {
-    const { HandLandmarker, FilesetResolver } = await import(`${MP}/vision_bundle.mjs`);
-    const lm = await HandLandmarker.createFromOptions(await FilesetResolver.forVisionTasks(`${MP}/wasm`), {
-      baseOptions: { modelAssetPath: MODEL }, runningMode: 'VIDEO', numHands: 1, minHandDetectionConfidence: 0.6,
+    w = new Worker(URL.createObjectURL(new Blob([HAND_WORKER], { type: 'text/javascript' })));
+    const via = await new Promise((ok, fail) => {
+      w.onmessage = ({ data }) => data.error ? fail(new Error(data.error)) : ok(data.ready);
+      w.onerror = e => fail(new Error(e.message));
+      w.postMessage({ init: true, mp: MP, model: MODEL });
     });
-    const s = await navigator.mediaDevices.getUserMedia({ video: true });
+    // 320x240 alcanza: el modelo achica la imagen igual, y menos píxeles es menos trabajo por cuadro.
+    const s = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 320 }, height: { ideal: 240 } } });
     const v = document.createElement('video');
     v.muted = true; v.playsInline = true; v.srcObject = s;
     await v.play();
-    hands = { lm, v, s }; handsErr = '';
-  } catch (e) { handsErr = 'gestos: ' + e.message; }
+    hands = { w, v, s, via, busy: false }; handsErr = '';
+    w.onmessage = ({ data }) => { if (hands) { hands.busy = false; onHand(data.hand, performance.now()); } };
+  } catch (e) { w?.terminate(); handsErr = 'gestos: ' + e.message; }
   handsBusy = false;
 }
 
 function stopHands() {
   hands.s.getTracks().forEach(t => t.stop());
-  hands.lm.close();
+  hands.w.terminate();
   hands = null; gesture = ''; held = {};
 }
 
+// Desde draw(): manda un cuadro al Worker si no hay otro en curso. No espera el resultado.
 function detect(now) {
-  if (now - lastD < 50 || hands.v.readyState < 2) return; // ~20 detecciones por segundo
-  lastD = now;
-  const [hand] = hands.lm.detectForVideo(hands.v, now).landmarks;
+  if (hands.busy || now - lastD < DETECT_MS || hands.v.readyState < 2) return;
+  hands.busy = true; lastD = now;
+  const h = hands;
+  createImageBitmap(h.v).then(frame => hands === h ? h.w.postMessage({ frame, t: now }, [frame]) : frame.close(), () => h.busy = false);
+}
+
+function onHand(hand, now) {
   gesture = hand ? classify(hand) : '';
   if (gesture !== held.g) held = { g: gesture, since: now }; // cambió la pose: vuelve a contar
   const orden = GESTO_A_ORDEN[gesture];
@@ -409,7 +443,7 @@ function status(now) {
   const w = Math.max(10, Math.min(40, Math.floor((innerWidth - 40) / 7.2) - 16)), n = Math.round(pos / it.duration_ms * w); // 7.2 px = un caracter a 12px
   return [
     `${player.is_playing ? '>' : '||'} ${it.name} - ${it.artists?.map(a => a.name).join(', ') ?? ''}`,
-    `[${'#'.repeat(n)}${'-'.repeat(w - n)}] ${mmss(pos)} / ${mmss(it.duration_ms)}${TAP === 'Tocá' ? '' : `    espacio: play/pausa   <- ->: tema   ${micErr || (an ? `${audioSrc} [${'#'.repeat(Math.round(level * 10)).padEnd(10, '-')}]${pulse > 0.5 ? ' BEAT' : ''}` : 'm: micrófono · a: audio de la PC')}   ${vidErr || (vid ? 'v: cortar video' : 'v: video')}   ${handsErr || (hands ? `g: cortar gestos [${gesture || '-'}]` : 'g: gestos')}`}`,
+    `[${'#'.repeat(n)}${'-'.repeat(w - n)}] ${mmss(pos)} / ${mmss(it.duration_ms)}${TAP === 'Tocá' ? '' : `    espacio: play/pausa   <- ->: tema   ${micErr || (an ? `${audioSrc} [${'#'.repeat(Math.round(level * 10)).padEnd(10, '-')}]${pulse > 0.5 ? ' BEAT' : ''}` : 'm: micrófono · a: audio de la PC')}   ${vidErr || (vid ? 'v: cortar video' : 'v: video')}   ${handsErr || (hands ? `g: cortar gestos (${hands.via}) [${gesture || '-'}]` : 'g: gestos')}`}`,
   ];
 }
 
