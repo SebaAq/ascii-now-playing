@@ -39,3 +39,5 @@ Todo corre en tu navegador. El login usa PKCE (sin backend ni client secret) y l
 ## Licencia
 
 [MIT](LICENSE)
+
+Desarrollado con asistencia de [Claude Code](https://claude.com/claude-code).
