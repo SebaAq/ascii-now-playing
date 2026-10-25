@@ -90,18 +90,43 @@ async function poll() {
   } catch (e) { msg = e.message; }
 }
 
-// Letra sincronizada de LRCLIB (Spotify no expone letras). Sin letra = no se muestra nada.
+// Letra de LRCLIB (Spotify no expone letras). Sin letra = no se muestra nada.
+// Primero la búsqueda exacta (nombre + artista + álbum + duración ±2 s); si falla, la búsqueda difusa
+// con el nombre limpio, quedándose con el resultado de duración más cercana (prefiriendo los sincronizados).
+const LRC = 'https://lrclib.net/api/';
+// "Song - Remastered 2011", "Song (feat. X)", "Song - Live at..." → "Song"
+const cleanName = s => s.replace(/\s+-\s+.*$/, '').replace(/\s*[([](feat|ft|with|con)\.?\s[^)\]]*[)\]]/gi, '').trim() || s;
+
+async function lrc(path, params) {
+  const r = await fetch(LRC + path + '?' + new URLSearchParams(params));
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`LRCLIB ${r.status}`);
+  return r.json();
+}
+
+async function findLyrics(it) {
+  const dur = it.duration_ms / 1000, artist = it.artists[0].name;
+  const exact = await lrc('get', { track_name: it.name, artist_name: artist, album_name: it.album.name, duration: Math.round(dur) });
+  if (exact?.syncedLyrics) return exact;
+  const found = await lrc('search', { track_name: cleanName(it.name), artist_name: artist }) ?? [];
+  const near = found.filter(x => !x.instrumental && (x.syncedLyrics || x.plainLyrics) && Math.abs(x.duration - dur) <= 10)
+    .sort((a, b) => !!b.syncedLyrics - !!a.syncedLyrics || Math.abs(a.duration - dur) - Math.abs(b.duration - dur));
+  return near[0] ?? exact; // exact puede traer solo plainLyrics
+}
+
 async function loadLyrics(it) {
   lyrics = [];
   try {
-    const r = await fetch('https://lrclib.net/api/get?' + new URLSearchParams({
-      track_name: it.name, artist_name: it.artists[0].name, album_name: it.album.name, duration: Math.round(it.duration_ms / 1000),
-    }));
-    const { syncedLyrics } = await r.json();
+    const hit = await findLyrics(it);
     if (player?.item?.id !== it.id) return; // cambió el tema mientras tanto
-    lyrics = (syncedLyrics ?? '').split('\n').map(l => l.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)/)).filter(Boolean)
-      .map(([, m, s, text]) => ({ t: (m * 60 + +s) * 1000, text }));
-  } catch {}
+    if (hit?.syncedLyrics) {
+      lyrics = hit.syncedLyrics.split('\n').map(l => l.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)/)).filter(Boolean)
+        .map(([, m, s, text]) => ({ t: (m * 60 + +s) * 1000, text }));
+    } else if (hit?.plainLyrics) { // sin tiempos: se reparte a lo largo del tema, dejando aire al principio y al final
+      const lines = hit.plainLyrics.split('\n').map(s => s.trim()).filter(Boolean), d = it.duration_ms;
+      lyrics = lines.map((text, i) => ({ t: d * (0.08 + 0.84 * i / lines.length), text }));
+    } else console.info('Sin letra en LRCLIB:', it.artists[0].name, '-', it.name);
+  } catch (e) { console.warn('No se pudo traer la letra:', e); }
 }
 
 // --- Render ASCII ---
