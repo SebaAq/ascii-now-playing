@@ -98,20 +98,28 @@ const LRC = 'https://lrclib.net/api/';
 const cleanName = s => s.replace(/\s+-\s+.*$/, '').replace(/\s*[([](feat|ft|with|con)\.?\s[^)\]]*[)\]]/gi, '').trim() || s;
 
 async function lrc(path, params) {
-  const r = await fetch(LRC + path + '?' + new URLSearchParams(params));
-  if (r.status === 404) return null;
-  if (!r.ok) throw new Error(`LRCLIB ${r.status}`);
-  return r.json();
+  for (let i = 0; ; i++) {
+    const r = await fetch(LRC + path + '?' + new URLSearchParams(params));
+    if (r.status === 404) return null;
+    if (r.ok) return r.json();
+    // 503 = "server busy, retry in a moment": reintentar a los 1 s y 2 s
+    if (r.status !== 503 || i === 2) throw new Error(`LRCLIB ${r.status}`);
+    await new Promise(res => setTimeout(res, 1000 * 2 ** i));
+  }
 }
 
 async function findLyrics(it) {
-  const dur = it.duration_ms / 1000, artist = it.artists[0].name;
-  const exact = await lrc('get', { track_name: it.name, artist_name: artist, album_name: it.album.name, duration: Math.round(dur) });
+  const dur = it.duration_ms / 1000, artist = it.artists[0].name, name = cleanName(it.name);
+  // si la exacta falla (503 que no se va, etc.) igual se prueba la difusa
+  const exact = await lrc('get', { track_name: it.name, artist_name: artist, album_name: it.album.name, duration: Math.round(dur) })
+    .catch(e => (console.warn('Falló la búsqueda exacta de la letra:', e), null));
   if (exact?.syncedLyrics) return exact;
-  const found = await lrc('search', { track_name: cleanName(it.name), artist_name: artist }) ?? [];
-  const near = found.filter(x => !x.instrumental && (x.syncedLyrics || x.plainLyrics) && Math.abs(x.duration - dur) <= 10)
-    .sort((a, b) => !!b.syncedLyrics - !!a.syncedLyrics || Math.abs(a.duration - dur) - Math.abs(b.duration - dur));
-  return near[0] ?? exact; // exact puede traer solo plainLyrics
+  const best = found => found.filter(x => !x.instrumental && (x.syncedLyrics || x.plainLyrics) && Math.abs(x.duration - dur) <= 10)
+    .sort((a, b) => !!b.syncedLyrics - !!a.syncedLyrics || Math.abs(a.duration - dur) - Math.abs(b.duration - dur))[0];
+  // con el artista; si no, solo por nombre (LRCLIB a veces carga "Fiah, Six Sex" donde Spotify dice otro artista)
+  return best(await lrc('search', { track_name: name, artist_name: artist }) ?? [])
+    ?? best(await lrc('search', { q: name }) ?? [])
+    ?? exact; // exact puede traer solo plainLyrics
 }
 
 async function loadLyrics(it) {
