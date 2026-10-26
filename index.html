@@ -442,22 +442,45 @@ function place(text) {
   return { lines, x: lo + (Math.random() * (hi - lo + 1) | 0), y: y0 + (Math.random() * Math.max(1, y1 - y0 - h + 1) | 0) };
 }
 
-// Cada línea aparece en otro lugar y se "tipea" con caracteres al azar que se asientan, igual que la tapa al crecer.
-function say(l, pos, alpha) {
+// Cada línea aparece en otro lugar, levemente torcida, entra con un golpe de zoom y se tipea con un cursor de bloque;
+// al entrar y al salir tiembla con un glitch RGB (corrimiento por renglón y copias roja y cian).
+function say(l, pos, alpha, span) {
   if (!l.text || alpha <= 0) return;
-  l.at ??= place(l.text);
-  ctx.fillStyle = `rgba(${tint.r},${tint.g},${tint.b},${Math.min(alpha, 1)})`;
-  ctx.strokeStyle = `rgba(0,0,0,${0.85 * Math.min(alpha, 1)})`; ctx.lineWidth = 4; ctx.lineJoin = 'round';
-  let j = 0;
+  l.at ??= { ...place(l.text), rot: (Math.random() - 0.5) * 0.1 }; // ±3°
+  const age = pos - l.t, a = Math.min(alpha, 1), LW = 2;
+  const per = Math.min(90, Math.max(25, span * 0.5 / l.text.length)); // tipea en la primera mitad del renglón
+  const glitch = Math.max(0, 1 - age / 160, 1 - a);
+  const zoom = 1 + 0.3 * Math.max(0, 1 - age / 180) ** 2;
+  const w = Math.max(...l.at.lines.map(s => s.length)) * LW * CW, h = l.at.lines.length * 2 * CH;
+  const cx = (l.at.x + 1) * CW + w / 2, cy = l.at.y * CH + h / 2;
+  ctx.save();
+  ctx.translate(cx, cy); ctx.rotate(l.at.rot); ctx.scale(zoom, zoom); ctx.translate(-w / 2, -h / 2);
+  ctx.strokeStyle = `rgba(0,0,0,${0.85 * a})`; ctx.lineWidth = 4; ctx.lineJoin = 'round';
+  let j = 0, cur = null;
   l.at.lines.forEach((s, row) => {
     const text = [...s].map(c => {
-      const k = (pos - l.t) / 30 - j++;
+      const k = (pos - l.t) / per - j++;
+      if (k <= 0 && !cur) cur = [row, j - 1];
       return k > 4 || c === ' ' ? c : k > 0 ? RAMP[Math.random() * RAMP.length | 0] : ' ';
     }).join('');
-    const x = (l.at.x + 1) * CW, y = (l.at.y + row * 2) * CH;
+    const x = (Math.random() - 0.5) * glitch * 6 * CW, y = row * 2 * CH;
+    if (glitch > 0.05) {
+      const d = glitch * 4;
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = `rgba(255,40,60,${0.7 * a})`; ctx.fillText(text, x - d, y);
+      ctx.fillStyle = `rgba(40,220,255,${0.7 * a})`; ctx.fillText(text, x + d, y);
+    }
     ctx.shadowBlur = 0; ctx.strokeText(text, x, y); ctx.shadowBlur = 6; // contorno negro: despega la letra si cae sobre el arte
-    ctx.fillText(text, x, y);
+    ctx.fillStyle = `rgba(${tint.r},${tint.g},${tint.b},${a})`; ctx.fillText(text, x, y);
   });
+  // El cursor va delante del tipeo; con el renglón completo titila al final, solo en la línea actual.
+  const last = l.at.lines.length - 1;
+  cur ??= alpha >= 1 && (pos / 400 | 0) % 2 ? [last, l.at.lines[last].length] : null;
+  if (cur) {
+    ctx.shadowBlur = 0; ctx.fillStyle = `rgba(${tint.r},${tint.g},${tint.b},${0.9 * a})`;
+    ctx.fillRect(cur[1] * LW * CW, cur[0] * 2 * CH, LW * CW * 0.9, 2 * CH);
+  }
+  ctx.restore();
 }
 
 function lyric(now) {
@@ -466,8 +489,9 @@ function lyric(now) {
   if (i < 0) return;
   ctx.font = `${FONT * 2}px ${MONO}`;
   ctx.shadowColor = `rgb(${tint.r},${tint.g},${tint.b})`; ctx.shadowBlur = 6;
-  if (i > 0) say(lyrics[i - 1], pos, 1 - (pos - lyrics[i].t) / 800); // la anterior se apaga
-  say(lyrics[i], pos, 1);
+  const span = (lyrics[i + 1]?.t ?? lyrics[i].t + 4000) - lyrics[i].t;
+  if (i > 0) say(lyrics[i - 1], pos, 1 - (pos - lyrics[i].t) / 300, span); // la anterior se va con glitch
+  say(lyrics[i], pos, 1, span);
   ctx.shadowBlur = 0;
   ctx.font = `${FONT}px ${MONO}`;
 }
